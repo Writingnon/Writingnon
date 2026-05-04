@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Reddit Hide User Comments
 // @namespace    https://github.com/writingnon/writingnon
-// @version      1.0.0
+// @version      1.2.0
 // @description  Adds an "ignore" button next to commenter usernames on Reddit. Comments from ignored users are replaced with the word "ignored", while their child replies remain visible.
 // @author       writingnon
 // @match        *://*.reddit.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @run-at       document-idle
+// @run-at       document-end
+// @noframes
 // ==/UserScript==
 
 (function () {
@@ -72,52 +73,82 @@
         btn.href = 'javascript:void(0)';
         btn.className = 'ignore-user-btn';
         btn.textContent = alreadyIgnored ? 'unignore' : 'ignore';
+        btn.setAttribute('role', 'button');
         btn.style.marginLeft = '6px';
-        btn.style.fontSize = '11px';
-        btn.style.color = alreadyIgnored ? '#888' : '#cc3333';
+        btn.style.padding = '2px 6px';
+        btn.style.fontSize = '12px';
+        btn.style.color = '#fff';
+        btn.style.background = alreadyIgnored ? '#888' : '#cc3333';
+        btn.style.borderRadius = '3px';
         btn.style.cursor = 'pointer';
-        btn.style.textDecoration = 'underline';
-        btn.addEventListener('click', function (e) {
+        btn.style.textDecoration = 'none';
+        btn.style.display = 'inline-block';
+        btn.style.touchAction = 'manipulation';
+        const handler = function (e) {
             e.preventDefault();
             e.stopPropagation();
-            if (isIgnored(author)) {
-                unignore(author);
-            } else {
-                ignore(author);
-            }
-        });
+            if (isIgnored(author)) unignore(author);
+            else ignore(author);
+        };
+        btn.addEventListener('click', handler);
+        // Some Android browsers swallow click on injected anchors; touchend is a reliable backup.
+        btn.addEventListener('touchend', handler, { passive: false });
         return btn;
     }
 
     // ---------- Old Reddit ----------
+    // Note: covers desktop old.reddit.com AND the mobile ".compact" layout
+    // (which extra-wraps things and is what Android browsers see, including
+    // when the user has the Oldlander redirector installed).
 
     function processOldReddit(root) {
-        // Match both "div.comment" (full subtree) and "div.thing.comment".
-        const comments = (root || document).querySelectorAll('div.thing.comment, div.comment');
+        // Comments may appear as `.thing.comment` or just `.thing[data-author]`.
+        // Use [data-author] so we cover the compact mobile markup too.
+        const comments = (root || document).querySelectorAll(
+            '.thing.comment[data-author], .thing[data-type="comment"][data-author], .comment[data-author]'
+        );
         comments.forEach(processOldComment);
     }
 
+    // Find this comment's own .entry, walking through arbitrary wrapper divs
+    // that the compact layout sometimes inserts. Stop if we cross into a nested
+    // comment.
     function getOwnEntry(comment) {
-        // Direct-child entry (skip entries belonging to nested comments).
-        for (const child of comment.children) {
-            if (child.classList && child.classList.contains('entry')) return child;
+        const all = comment.querySelectorAll('.entry');
+        for (const e of all) {
+            if (e.closest('.thing.comment, .comment[data-author], .thing[data-type="comment"]') === comment) {
+                return e;
+            }
         }
         return null;
     }
 
-    function getOwnBody(entry) {
-        // The comment's own body lives at: entry > form.usertext > div.usertext-body.
-        // A separate reply form (also a usertext-body) may appear as a sibling — skip it
-        // by taking only the first form that is NOT a reply form.
-        const forms = entry.querySelectorAll(':scope > form.usertext');
-        for (const f of forms) {
-            if (f.classList.contains('cloneable')) continue; // template
-            const body = f.querySelector(':scope > div.usertext-body');
-            if (body) return body;
+    function getOwnBody(comment, entry) {
+        // The comment body lives in a usertext-body inside the entry.
+        // Skip the cloneable reply-form template and any reply form whose
+        // closest comment ancestor is still us (an inline reply box).
+        const candidates = entry.querySelectorAll('.usertext-body');
+        let firstNonReply = null;
+        for (const body of candidates) {
+            if (body.closest('.thing.comment, .comment[data-author], .thing[data-type="comment"]') !== comment) continue;
+            const form = body.closest('form.usertext');
+            if (form && form.classList.contains('cloneable')) continue;
+            // The genuine comment body sits inside a non-cloneable form that
+            // is itself a direct/near child of `entry` (not inside a `.child`
+            // reply container or an "edit/reply" wrapper).
+            if (!firstNonReply) firstNonReply = body;
+            // Prefer one whose containing form is a direct child of entry.
+            if (form && form.parentElement === entry) return body;
         }
-        // Fallback: first direct-descendant usertext-body inside entry.
-        return entry.querySelector(':scope > form > .usertext-body') ||
-               entry.querySelector(':scope .usertext-body');
+        return firstNonReply;
+    }
+
+    function findAuthorLink(entry) {
+        // Old reddit: a.author. Compact may render the username inside a span
+        // with class "author" — handle both.
+        return entry.querySelector('a.author') ||
+               entry.querySelector('.tagline a[href*="/user/"]') ||
+               entry.querySelector('.tagline a[href*="/u/"]');
     }
 
     function processOldComment(comment) {
@@ -128,25 +159,23 @@
         const entry = getOwnEntry(comment);
         if (!entry) return;
 
-        // Add ignore button next to the username if not already present.
         if (!comment.hasAttribute(PROCESSED_ATTR)) {
-            const tagline = entry.querySelector(':scope > p.tagline, :scope > .tagline');
-            const authorLink = (tagline || entry).querySelector('a.author');
-            if (authorLink && !(tagline || entry).querySelector('.ignore-user-btn')) {
+            const authorLink = findAuthorLink(entry);
+            if (authorLink && !entry.querySelector('.ignore-user-btn')) {
                 const btn = makeButton(author, isIgnored(author));
                 authorLink.insertAdjacentElement('afterend', btn);
+                comment.setAttribute(PROCESSED_ATTR, '1');
             }
-            comment.setAttribute(PROCESSED_ATTR, '1');
         } else {
-            const btn = entry.querySelector(':scope .ignore-user-btn');
+            const btn = entry.querySelector('.ignore-user-btn');
             if (btn) {
                 const ig = isIgnored(author);
                 btn.textContent = ig ? 'unignore' : 'ignore';
-                btn.style.color = ig ? '#888' : '#cc3333';
+                btn.style.background = ig ? '#888' : '#cc3333';
             }
         }
 
-        const body = getOwnBody(entry);
+        const body = getOwnBody(comment, entry);
         if (!body) return;
 
         if (isIgnored(author)) {
@@ -224,19 +253,33 @@
         processNewReddit(document);
     }
 
-    // Initial pass.
-    applyAll();
+    let pending = false;
+    function scheduleApply() {
+        if (pending) return;
+        pending = true;
+        // rAF + microtask defer keeps us cheap when many nodes mount at once.
+        (window.requestAnimationFrame || setTimeout)(() => {
+            pending = false;
+            applyAll();
+        });
+    }
 
-    // Watch for new comments loaded dynamically (load-more, infinite scroll, route changes).
-    const observer = new MutationObserver((mutations) => {
-        let needsRun = false;
-        for (const m of mutations) {
-            if (m.addedNodes && m.addedNodes.length) {
-                needsRun = true;
-                break;
+    function start() {
+        applyAll();
+        const observer = new MutationObserver((mutations) => {
+            for (const m of mutations) {
+                if (m.addedNodes && m.addedNodes.length) {
+                    scheduleApply();
+                    return;
+                }
             }
-        }
-        if (needsRun) applyAll();
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+    }
+
+    if (document.body) {
+        start();
+    } else {
+        document.addEventListener('DOMContentLoaded', start, { once: true });
+    }
 })();
