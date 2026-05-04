@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reddit Hide User Comments
 // @namespace    https://github.com/writingnon/writingnon
-// @version      1.2.0
+// @version      1.3.0
 // @description  Adds an "ignore" button next to commenter usernames on Reddit. Comments from ignored users are replaced with the word "ignored", while their child replies remain visible.
 // @author       writingnon
 // @match        *://*.reddit.com/*
@@ -69,30 +69,55 @@
     }
 
     function makeButton(author, alreadyIgnored) {
-        const btn = document.createElement('a');
-        btn.href = 'javascript:void(0)';
+        // Use a real <button>, not an <a href="javascript:...">. Edge (and other
+        // browsers) sometimes block the javascript: scheme via page CSP, and
+        // old reddit attaches its own click handlers to .tagline anchors that
+        // can shadow ours.
+        const btn = document.createElement('button');
+        btn.type = 'button';
         btn.className = 'ignore-user-btn';
         btn.textContent = alreadyIgnored ? 'unignore' : 'ignore';
-        btn.setAttribute('role', 'button');
-        btn.style.marginLeft = '6px';
-        btn.style.padding = '2px 6px';
-        btn.style.fontSize = '12px';
-        btn.style.color = '#fff';
-        btn.style.background = alreadyIgnored ? '#888' : '#cc3333';
-        btn.style.borderRadius = '3px';
-        btn.style.cursor = 'pointer';
-        btn.style.textDecoration = 'none';
-        btn.style.display = 'inline-block';
-        btn.style.touchAction = 'manipulation';
+        btn.title = alreadyIgnored ? 'Unignore ' + author : 'Ignore ' + author;
+        const baseStyle = {
+            marginLeft: '6px',
+            padding: '1px 6px',
+            fontSize: '11px',
+            lineHeight: '1.4',
+            color: '#fff',
+            background: alreadyIgnored ? '#888' : '#cc3333',
+            border: '0',
+            borderRadius: '3px',
+            cursor: 'pointer',
+            textDecoration: 'none',
+            display: 'inline-block',
+            verticalAlign: 'baseline',
+            font: 'inherit',
+            touchAction: 'manipulation',
+        };
+        Object.assign(btn.style, baseStyle);
+        btn.style.fontSize = '11px';
+
         const handler = function (e) {
-            e.preventDefault();
-            e.stopPropagation();
+            // Stop old reddit's tagline-level handlers from also acting.
+            if (e) {
+                if (e.preventDefault) e.preventDefault();
+                if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+                else if (e.stopPropagation) e.stopPropagation();
+            }
             if (isIgnored(author)) unignore(author);
             else ignore(author);
+            return false;
         };
-        btn.addEventListener('click', handler);
-        // Some Android browsers swallow click on injected anchors; touchend is a reliable backup.
-        btn.addEventListener('touchend', handler, { passive: false });
+        // pointerup fires for mouse, pen and touch in Edge/Chromium; click is
+        // the universal fallback. Capture-phase ensures we run before any
+        // ancestor handlers Reddit installed on the tagline.
+        btn.addEventListener('pointerup', handler, true);
+        btn.addEventListener('click', handler, true);
+        // mousedown stops old reddit's onmousedown="..." vote/expand handlers
+        // from cancelling the subsequent click.
+        btn.addEventListener('mousedown', function (e) {
+            if (e && e.stopPropagation) e.stopPropagation();
+        }, true);
         return btn;
     }
 
