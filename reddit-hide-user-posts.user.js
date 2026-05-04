@@ -92,27 +92,53 @@
     // ---------- Old Reddit ----------
 
     function processOldReddit(root) {
-        const comments = (root || document).querySelectorAll('div.comment');
+        // Match both "div.comment" (full subtree) and "div.thing.comment".
+        const comments = (root || document).querySelectorAll('div.thing.comment, div.comment');
         comments.forEach(processOldComment);
     }
 
+    function getOwnEntry(comment) {
+        // Direct-child entry (skip entries belonging to nested comments).
+        for (const child of comment.children) {
+            if (child.classList && child.classList.contains('entry')) return child;
+        }
+        return null;
+    }
+
+    function getOwnBody(entry) {
+        // The comment's own body lives at: entry > form.usertext > div.usertext-body.
+        // A separate reply form (also a usertext-body) may appear as a sibling — skip it
+        // by taking only the first form that is NOT a reply form.
+        const forms = entry.querySelectorAll(':scope > form.usertext');
+        for (const f of forms) {
+            if (f.classList.contains('cloneable')) continue; // template
+            const body = f.querySelector(':scope > div.usertext-body');
+            if (body) return body;
+        }
+        // Fallback: first direct-descendant usertext-body inside entry.
+        return entry.querySelector(':scope > form > .usertext-body') ||
+               entry.querySelector(':scope .usertext-body');
+    }
+
     function processOldComment(comment) {
+        if (comment.getAttribute('data-deleted') === 'true') return;
         const author = comment.getAttribute('data-author');
-        if (!author) return;
+        if (!author || author === '[deleted]') return;
+
+        const entry = getOwnEntry(comment);
+        if (!entry) return;
 
         // Add ignore button next to the username if not already present.
         if (!comment.hasAttribute(PROCESSED_ATTR)) {
-            const entry = comment.querySelector(':scope > .entry');
-            const authorLink = entry && entry.querySelector('a.author');
-            if (authorLink && !entry.querySelector(':scope .ignore-user-btn')) {
+            const tagline = entry.querySelector(':scope > p.tagline, :scope > .tagline');
+            const authorLink = (tagline || entry).querySelector('a.author');
+            if (authorLink && !(tagline || entry).querySelector('.ignore-user-btn')) {
                 const btn = makeButton(author, isIgnored(author));
                 authorLink.insertAdjacentElement('afterend', btn);
             }
             comment.setAttribute(PROCESSED_ATTR, '1');
         } else {
-            // Refresh button label.
-            const entry = comment.querySelector(':scope > .entry');
-            const btn = entry && entry.querySelector(':scope .ignore-user-btn');
+            const btn = entry.querySelector(':scope .ignore-user-btn');
             if (btn) {
                 const ig = isIgnored(author);
                 btn.textContent = ig ? 'unignore' : 'ignore';
@@ -120,21 +146,18 @@
             }
         }
 
-        const body = comment.querySelector(':scope > .entry .usertext-body');
+        const body = getOwnBody(entry);
         if (!body) return;
 
         if (isIgnored(author)) {
             if (!body.hasAttribute(HIDDEN_ATTR)) {
-                const original = body.innerHTML;
                 body.setAttribute(HIDDEN_ATTR, '1');
-                body.setAttribute('data-original-html', encodeURIComponent(original));
+                body.setAttribute('data-original-html', encodeURIComponent(body.innerHTML));
                 body.innerHTML = '<div class="md"><p><em>ignored</em></p></div>';
             }
         } else if (body.hasAttribute(HIDDEN_ATTR)) {
             const original = body.getAttribute('data-original-html');
-            if (original !== null) {
-                body.innerHTML = decodeURIComponent(original);
-            }
+            if (original !== null) body.innerHTML = decodeURIComponent(original);
             body.removeAttribute(HIDDEN_ATTR);
             body.removeAttribute('data-original-html');
         }
