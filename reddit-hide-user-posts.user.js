@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Reddit Hide User Comments
 // @namespace    https://github.com/writingnon/writingnon
-// @version      1.3.0
-// @description  Adds an "ignore" button next to commenter usernames on Reddit. Comments from ignored users are replaced with the word "ignored", while their child replies remain visible.
+// @version      2.0.0
+// @description  Adds an "ignore" link next to commenter usernames on Reddit. Comments from ignored users are replaced with the word "ignored", while their child replies remain visible.
 // @author       writingnon
 // @match        *://*.reddit.com/*
 // @grant        GM_getValue
@@ -15,18 +15,22 @@
     'use strict';
 
     const STORAGE_KEY = 'reddit_ignored_users';
-    const PROCESSED_ATTR = 'data-ignore-btn-added';
-    const HIDDEN_ATTR = 'data-ignore-hidden';
+    const PROCESSED_ATTR = 'data-rhuc-added';
+    const HIDDEN_ATTR = 'data-rhuc-hidden';
+    const ORIGINAL_ATTR = 'data-rhuc-original';
+    const BTN_CLASS = 'rhuc-ignore-btn';
+    const AUTHOR_DATA_ATTR = 'data-rhuc-author';
 
     const hasGM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
 
+    // ---------- Storage ----------
+
     function loadIgnored() {
         try {
-            if (hasGM) {
-                const raw = GM_getValue(STORAGE_KEY, '[]');
-                return new Set(JSON.parse(raw));
-            }
-            return new Set(JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'));
+            const raw = hasGM
+                ? GM_getValue(STORAGE_KEY, '[]')
+                : (localStorage.getItem(STORAGE_KEY) || '[]');
+            return new Set(JSON.parse(raw));
         } catch (_) {
             return new Set();
         }
@@ -34,11 +38,8 @@
 
     function saveIgnored(set) {
         const json = JSON.stringify([...set]);
-        if (hasGM) {
-            GM_setValue(STORAGE_KEY, json);
-        } else {
-            localStorage.setItem(STORAGE_KEY, json);
-        }
+        if (hasGM) GM_setValue(STORAGE_KEY, json);
+        else localStorage.setItem(STORAGE_KEY, json);
     }
 
     let ignored = loadIgnored();
@@ -48,129 +49,107 @@
         return String(name).replace(/^\/?u\//i, '').trim().toLowerCase();
     }
 
-    function ignore(name) {
-        const n = normalize(name);
-        if (!n) return;
-        ignored.add(n);
-        saveIgnored(ignored);
-        applyAll();
-    }
-
-    function unignore(name) {
-        const n = normalize(name);
-        if (!n) return;
-        ignored.delete(n);
-        saveIgnored(ignored);
-        applyAll();
-    }
-
     function isIgnored(name) {
         return ignored.has(normalize(name));
     }
 
-    function makeButton(author, alreadyIgnored) {
-        // Use a real <button>, not an <a href="javascript:...">. Edge (and other
-        // browsers) sometimes block the javascript: scheme via page CSP, and
-        // old reddit attaches its own click handlers to .tagline anchors that
-        // can shadow ours.
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'ignore-user-btn';
-        btn.textContent = alreadyIgnored ? 'unignore' : 'ignore';
-        btn.title = alreadyIgnored ? 'Unignore ' + author : 'Ignore ' + author;
-        const baseStyle = {
-            marginLeft: '6px',
-            padding: '1px 6px',
-            fontSize: '11px',
-            lineHeight: '1.4',
-            color: '#fff',
-            background: alreadyIgnored ? '#888' : '#cc3333',
-            border: '0',
-            borderRadius: '3px',
-            cursor: 'pointer',
-            textDecoration: 'none',
-            display: 'inline-block',
-            verticalAlign: 'baseline',
-            font: 'inherit',
-            touchAction: 'manipulation',
-        };
-        Object.assign(btn.style, baseStyle);
-        btn.style.fontSize = '11px';
+    function toggleIgnored(name) {
+        const n = normalize(name);
+        if (!n) return;
+        if (ignored.has(n)) ignored.delete(n);
+        else ignored.add(n);
+        saveIgnored(ignored);
+        applyAll();
+    }
 
-        const handler = function (e) {
-            // Stop old reddit's tagline-level handlers from also acting.
-            if (e) {
-                if (e.preventDefault) e.preventDefault();
-                if (e.stopImmediatePropagation) e.stopImmediatePropagation();
-                else if (e.stopPropagation) e.stopPropagation();
+    // ---------- Styles ----------
+    // Inject a stylesheet so reddit's `button { ... }` and `.entry a { ... }`
+    // rules can't override us. Everything is !important to win specificity wars
+    // against old reddit's bundled CSS.
+    function injectStyles() {
+        if (document.getElementById('rhuc-styles')) return;
+        const css = `
+            .${BTN_CLASS} {
+                display: inline-block !important;
+                margin: 0 0 0 6px !important;
+                padding: 1px 6px !important;
+                border: 0 !important;
+                border-radius: 3px !important;
+                background: #cc3333 !important;
+                color: #ffffff !important;
+                font: bold 11px/1.4 sans-serif !important;
+                text-decoration: none !important;
+                text-transform: lowercase !important;
+                cursor: pointer !important;
+                vertical-align: baseline !important;
+                box-shadow: none !important;
+                touch-action: manipulation !important;
+                user-select: none !important;
             }
-            if (isIgnored(author)) unignore(author);
-            else ignore(author);
-            return false;
-        };
-        // pointerup fires for mouse, pen and touch in Edge/Chromium; click is
-        // the universal fallback. Capture-phase ensures we run before any
-        // ancestor handlers Reddit installed on the tagline.
-        btn.addEventListener('pointerup', handler, true);
-        btn.addEventListener('click', handler, true);
-        // mousedown stops old reddit's onmousedown="..." vote/expand handlers
-        // from cancelling the subsequent click.
-        btn.addEventListener('mousedown', function (e) {
-            if (e && e.stopPropagation) e.stopPropagation();
-        }, true);
-        return btn;
+            .${BTN_CLASS}.rhuc-on {
+                background: #888888 !important;
+            }
+            .${BTN_CLASS}:hover {
+                opacity: 0.85 !important;
+            }
+        `;
+        const style = document.createElement('style');
+        style.id = 'rhuc-styles';
+        style.textContent = css;
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    function makeButton(author) {
+        // <a> rather than <button>: old reddit's CSS heavily restyles button
+        // elements but leaves anchors with custom classes alone. No href, so
+        // there's no navigation/CSP issue.
+        const a = document.createElement('a');
+        a.className = BTN_CLASS + (isIgnored(author) ? ' rhuc-on' : '');
+        a.textContent = isIgnored(author) ? 'unignore' : 'ignore';
+        a.setAttribute(AUTHOR_DATA_ATTR, author);
+        a.setAttribute('role', 'button');
+        a.setAttribute('tabindex', '0');
+        a.title = (isIgnored(author) ? 'Unignore ' : 'Ignore ') + author;
+        return a;
+    }
+
+    function refreshButton(btn, author) {
+        const on = isIgnored(author);
+        btn.textContent = on ? 'unignore' : 'ignore';
+        btn.classList.toggle('rhuc-on', on);
+        btn.title = (on ? 'Unignore ' : 'Ignore ') + author;
     }
 
     // ---------- Old Reddit ----------
-    // Note: covers desktop old.reddit.com AND the mobile ".compact" layout
-    // (which extra-wraps things and is what Android browsers see, including
-    // when the user has the Oldlander redirector installed).
+
+    const COMMENT_SEL = '.thing.comment[data-author], .thing[data-type="comment"][data-author], .comment[data-author]';
 
     function processOldReddit(root) {
-        // Comments may appear as `.thing.comment` or just `.thing[data-author]`.
-        // Use [data-author] so we cover the compact mobile markup too.
-        const comments = (root || document).querySelectorAll(
-            '.thing.comment[data-author], .thing[data-type="comment"][data-author], .comment[data-author]'
-        );
-        comments.forEach(processOldComment);
+        (root || document).querySelectorAll(COMMENT_SEL).forEach(processOldComment);
     }
 
-    // Find this comment's own .entry, walking through arbitrary wrapper divs
-    // that the compact layout sometimes inserts. Stop if we cross into a nested
-    // comment.
     function getOwnEntry(comment) {
         const all = comment.querySelectorAll('.entry');
         for (const e of all) {
-            if (e.closest('.thing.comment, .comment[data-author], .thing[data-type="comment"]') === comment) {
-                return e;
-            }
+            if (e.closest(COMMENT_SEL) === comment) return e;
         }
         return null;
     }
 
     function getOwnBody(comment, entry) {
-        // The comment body lives in a usertext-body inside the entry.
-        // Skip the cloneable reply-form template and any reply form whose
-        // closest comment ancestor is still us (an inline reply box).
         const candidates = entry.querySelectorAll('.usertext-body');
         let firstNonReply = null;
         for (const body of candidates) {
-            if (body.closest('.thing.comment, .comment[data-author], .thing[data-type="comment"]') !== comment) continue;
+            if (body.closest(COMMENT_SEL) !== comment) continue;
             const form = body.closest('form.usertext');
             if (form && form.classList.contains('cloneable')) continue;
-            // The genuine comment body sits inside a non-cloneable form that
-            // is itself a direct/near child of `entry` (not inside a `.child`
-            // reply container or an "edit/reply" wrapper).
             if (!firstNonReply) firstNonReply = body;
-            // Prefer one whose containing form is a direct child of entry.
             if (form && form.parentElement === entry) return body;
         }
         return firstNonReply;
     }
 
     function findAuthorLink(entry) {
-        // Old reddit: a.author. Compact may render the username inside a span
-        // with class "author" — handle both.
         return entry.querySelector('a.author') ||
                entry.querySelector('.tagline a[href*="/user/"]') ||
                entry.querySelector('.tagline a[href*="/u/"]');
@@ -184,20 +163,16 @@
         const entry = getOwnEntry(comment);
         if (!entry) return;
 
-        if (!comment.hasAttribute(PROCESSED_ATTR)) {
+        let btn = entry.querySelector('.' + BTN_CLASS);
+        if (!btn) {
             const authorLink = findAuthorLink(entry);
-            if (authorLink && !entry.querySelector('.ignore-user-btn')) {
-                const btn = makeButton(author, isIgnored(author));
+            if (authorLink) {
+                btn = makeButton(author);
                 authorLink.insertAdjacentElement('afterend', btn);
                 comment.setAttribute(PROCESSED_ATTR, '1');
             }
         } else {
-            const btn = entry.querySelector('.ignore-user-btn');
-            if (btn) {
-                const ig = isIgnored(author);
-                btn.textContent = ig ? 'unignore' : 'ignore';
-                btn.style.background = ig ? '#888' : '#cc3333';
-            }
+            refreshButton(btn, author);
         }
 
         const body = getOwnBody(comment, entry);
@@ -206,47 +181,39 @@
         if (isIgnored(author)) {
             if (!body.hasAttribute(HIDDEN_ATTR)) {
                 body.setAttribute(HIDDEN_ATTR, '1');
-                body.setAttribute('data-original-html', encodeURIComponent(body.innerHTML));
+                body.setAttribute(ORIGINAL_ATTR, encodeURIComponent(body.innerHTML));
                 body.innerHTML = '<div class="md"><p><em>ignored</em></p></div>';
             }
         } else if (body.hasAttribute(HIDDEN_ATTR)) {
-            const original = body.getAttribute('data-original-html');
+            const original = body.getAttribute(ORIGINAL_ATTR);
             if (original !== null) body.innerHTML = decodeURIComponent(original);
             body.removeAttribute(HIDDEN_ATTR);
-            body.removeAttribute('data-original-html');
+            body.removeAttribute(ORIGINAL_ATTR);
         }
     }
 
     // ---------- New Reddit (shreddit) ----------
 
     function processNewReddit(root) {
-        const comments = (root || document).querySelectorAll('shreddit-comment');
-        comments.forEach(processNewComment);
+        (root || document).querySelectorAll('shreddit-comment').forEach(processNewComment);
     }
 
     function processNewComment(comment) {
         const author = comment.getAttribute('author');
         if (!author) return;
 
-        // Username link lives inside a slot in light DOM.
         const headerAuthor = comment.querySelector('a[href^="/user/"], a[href^="/u/"]');
-
-        if (!comment.hasAttribute(PROCESSED_ATTR)) {
-            if (headerAuthor && !comment.querySelector(':scope .ignore-user-btn')) {
-                const btn = makeButton(author, isIgnored(author));
+        let btn = comment.querySelector('.' + BTN_CLASS);
+        if (!btn) {
+            if (headerAuthor) {
+                btn = makeButton(author);
                 headerAuthor.insertAdjacentElement('afterend', btn);
                 comment.setAttribute(PROCESSED_ATTR, '1');
             }
         } else {
-            const btn = comment.querySelector(':scope .ignore-user-btn');
-            if (btn) {
-                const ig = isIgnored(author);
-                btn.textContent = ig ? 'unignore' : 'ignore';
-                btn.style.color = ig ? '#888' : '#cc3333';
-            }
+            refreshButton(btn, author);
         }
 
-        // Find this comment's own body (avoid descending into nested shreddit-comment).
         const candidates = comment.querySelectorAll('[slot="comment"], div[id$="-post-rtjson-content"], .md');
         let body = null;
         for (const c of candidates) {
@@ -260,29 +227,53 @@
         if (isIgnored(author)) {
             if (!body.hasAttribute(HIDDEN_ATTR)) {
                 body.setAttribute(HIDDEN_ATTR, '1');
-                body.setAttribute('data-original-html', encodeURIComponent(body.innerHTML));
+                body.setAttribute(ORIGINAL_ATTR, encodeURIComponent(body.innerHTML));
                 body.innerHTML = '<p><em>ignored</em></p>';
             }
         } else if (body.hasAttribute(HIDDEN_ATTR)) {
-            const original = body.getAttribute('data-original-html');
-            if (original !== null) {
-                body.innerHTML = decodeURIComponent(original);
-            }
+            const original = body.getAttribute(ORIGINAL_ATTR);
+            if (original !== null) body.innerHTML = decodeURIComponent(original);
             body.removeAttribute(HIDDEN_ATTR);
-            body.removeAttribute('data-original-html');
+            body.removeAttribute(ORIGINAL_ATTR);
         }
     }
 
+    // ---------- Drive ----------
+
     function applyAll() {
-        processOldReddit(document);
-        processNewReddit(document);
+        try {
+            processOldReddit(document);
+            processNewReddit(document);
+        } catch (err) {
+            console.error('[reddit-hide-user-comments] applyAll error', err);
+        }
+    }
+
+    // Single document-level click handler: capture phase so old reddit's
+    // .entry click/expand handlers can't see the event first.
+    function onDocClick(e) {
+        const target = e.target && e.target.closest && e.target.closest('.' + BTN_CLASS);
+        if (!target) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+        const author = target.getAttribute(AUTHOR_DATA_ATTR);
+        if (author) toggleIgnored(author);
+    }
+
+    function onDocMousedown(e) {
+        // Old reddit installs onmousedown handlers on the tagline that can
+        // cancel the subsequent click. Stop them when we're the target.
+        if (e.target && e.target.closest && e.target.closest('.' + BTN_CLASS)) {
+            e.stopPropagation();
+            if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+        }
     }
 
     let pending = false;
     function scheduleApply() {
         if (pending) return;
         pending = true;
-        // rAF + microtask defer keeps us cheap when many nodes mount at once.
         (window.requestAnimationFrame || setTimeout)(() => {
             pending = false;
             applyAll();
@@ -290,21 +281,21 @@
     }
 
     function start() {
+        injectStyles();
+        document.addEventListener('click', onDocClick, true);
+        document.addEventListener('mousedown', onDocMousedown, true);
         applyAll();
-        const observer = new MutationObserver((mutations) => {
+
+        new MutationObserver((mutations) => {
             for (const m of mutations) {
                 if (m.addedNodes && m.addedNodes.length) {
                     scheduleApply();
                     return;
                 }
             }
-        });
-        observer.observe(document.body, { childList: true, subtree: true });
+        }).observe(document.body, { childList: true, subtree: true });
     }
 
-    if (document.body) {
-        start();
-    } else {
-        document.addEventListener('DOMContentLoaded', start, { once: true });
-    }
+    if (document.body) start();
+    else document.addEventListener('DOMContentLoaded', start, { once: true });
 })();
