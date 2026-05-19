@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Reddit Hide User Comments
 // @namespace    https://github.com/writingnon/writingnon
-// @version      2.1.0
+// @version      2.2.0
 // @description  Adds an "ignore" link next to commenter usernames on Reddit. Comments from ignored users are replaced with the word "ignored", while their child replies remain visible.
 // @author       writingnon
 // @match        *://*.reddit.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_listValues
 // @run-at       document-end
 // @noframes
 // ==/UserScript==
@@ -23,24 +25,135 @@
     const PLACEHOLDER_CLASS = 'rhuc-placeholder';
 
     const hasGM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+    const hasGMDelete = typeof GM_deleteValue === 'function';
+    const hasGMList = typeof GM_listValues === 'function';
+    const CHUNK_PREFIX = STORAGE_KEY + '__c_';
+    const CHUNK_COUNT_KEY = STORAGE_KEY + '__n';
+    const CHUNK_SIZE = 200; // names per chunk; small enough to fit any sane quota
 
     // ---------- Storage ----------
+    // Each save writes to BOTH the userscript manager (GM) and localStorage so
+    // they back each other up. Loads take the union of every source we know
+    // about, so transient quota failures on one backend don't drop names.
+
+    function safeParse(raw) {
+        if (!raw) return [];
+        try {
+            const v = JSON.parse(raw);
+            return Array.isArray(v) ? v : [];
+        } catch (_) { return []; }
+    }
+
+    function gmGet(key, fallback) {
+        if (!hasGM) return fallback;
+        try { return GM_getValue(key, fallback); }
+        catch (e) { console.warn('[reddit-ignore] GM_getValue failed', key, e); return fallback; }
+    }
+
+    function gmSet(key, value) {
+        if (!hasGM) return false;
+        try { GM_setValue(key, value); return true; }
+        catch (e) { console.warn('[reddit-ignore] GM_setValue failed', key, e); return false; }
+    }
+
+    function gmDelete(key) {
+        if (!hasGMDelete) return;
+        try { GM_deleteValue(key); } catch (_) {}
+    }
+
+    function lsGet(key) {
+        try { return localStorage.getItem(key); }
+        catch (_) { return null; }
+    }
+
+    function lsSet(key, value) {
+        try { localStorage.setItem(key, value); return true; }
+        catch (e) { console.warn('[reddit-ignore] localStorage failed', key, e); return false; }
+    }
 
     function loadIgnored() {
-        try {
-            const raw = hasGM
-                ? GM_getValue(STORAGE_KEY, '[]')
-                : (localStorage.getItem(STORAGE_KEY) || '[]');
-            return new Set(JSON.parse(raw));
-        } catch (_) {
-            return new Set();
+        const all = new Set();
+
+        // 1) GM legacy single-key.
+        safeParse(gmGet(STORAGE_KEY, null)).forEach((n) => all.add(n));
+
+        // 2) GM chunked keys.
+        const declared = parseInt(gmGet(CHUNK_COUNT_KEY, '0'), 10) || 0;
+        for (let i = 0; i < declared; i++) {
+            safeParse(gmGet(CHUNK_PREFIX + i, null)).forEach((n) => all.add(n));
         }
+        // Sweep any extra chunks (in case CHUNK_COUNT_KEY itself was lost).
+        if (hasGMList) {
+            try {
+                for (const k of GM_listValues()) {
+                    if (typeof k === 'string' && k.indexOf(CHUNK_PREFIX) === 0) {
+                        safeParse(gmGet(k, null)).forEach((n) => all.add(n));
+                    }
+                }
+            } catch (_) {}
+        }
+
+        // 3) localStorage fallback / mirror.
+        safeParse(lsGet(STORAGE_KEY)).forEach((n) => all.add(n));
+
+        return all;
     }
 
     function saveIgnored(set) {
-        const json = JSON.stringify([...set]);
-        if (hasGM) GM_setValue(STORAGE_KEY, json);
-        else localStorage.setItem(STORAGE_KEY, json);
+        const arr = [...set];
+        const json = JSON.stringify(arr);
+        let gmOk = false;
+
+        if (hasGM) {
+            // Try a single compact value first — cheapest, smallest footprint.
+            if (gmSet(STORAGE_KEY, json)) {
+                gmOk = true;
+                // Drop any chunked leftovers so we don't double-store.
+                const declared = parseInt(gmGet(CHUNK_COUNT_KEY, '0'), 10) || 0;
+                for (let i = 0; i < declared; i++) gmDelete(CHUNK_PREFIX + i);
+                gmDelete(CHUNK_COUNT_KEY);
+            } else {
+                // Compact save failed (likely per-key quota). Fall back to chunks
+                // so a single big value doesn't get rejected wholesale.
+                gmDelete(STORAGE_KEY);
+                const chunkCount = Math.max(1, Math.ceil(arr.length / CHUNK_SIZE));
+                let allChunksOk = true;
+                for (let i = 0; i < chunkCount; i++) {
+                    const part = arr.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+                    if (!gmSet(CHUNK_PREFIX + i, JSON.stringify(part))) {
+                        allChunksOk = false;
+                        break;
+                    }
+                }
+                if (allChunksOk) {
+                    gmSet(CHUNK_COUNT_KEY, String(chunkCount));
+                    // Trim any stale chunks past the new end.
+                    const declared = parseInt(gmGet(CHUNK_COUNT_KEY, '0'), 10) || 0;
+                    for (let i = chunkCount; i < declared; i++) gmDelete(CHUNK_PREFIX + i);
+                    gmOk = true;
+                }
+            }
+        }
+
+        // Always mirror to localStorage too.
+        const lsOk = lsSet(STORAGE_KEY, json);
+
+        if (!gmOk && !lsOk) {
+            console.error('[reddit-ignore] both storage backends failed; ignore list will not persist');
+        }
+    }
+
+    // Cross-tab sync: pick up names added on another tab so we don't overwrite
+    // them on the next save.
+    function installStorageSync() {
+        try {
+            window.addEventListener('storage', (e) => {
+                if (e.key === STORAGE_KEY) {
+                    safeParse(e.newValue).forEach((n) => ignored.add(n));
+                    applyAll();
+                }
+            });
+        } catch (_) {}
     }
 
     let ignored = loadIgnored();
@@ -282,6 +395,7 @@
 
     function start() {
         injectStyles();
+        installStorageSync();
         document.addEventListener('click', onDocClick, true);
         document.addEventListener('mousedown', onDocMousedown, true);
         applyAll();
