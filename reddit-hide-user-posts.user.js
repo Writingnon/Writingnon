@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reddit Hide User Comments
 // @namespace    https://github.com/writingnon/writingnon
-// @version      2.0.0
+// @version      2.1.0
 // @description  Adds an "ignore" link next to commenter usernames on Reddit. Comments from ignored users are replaced with the word "ignored", while their child replies remain visible.
 // @author       writingnon
 // @match        *://*.reddit.com/*
@@ -20,6 +20,7 @@
     const ORIGINAL_ATTR = 'data-rhuc-original';
     const BTN_CLASS = 'rhuc-ignore-btn';
     const AUTHOR_DATA_ATTR = 'data-rhuc-author';
+    const PLACEHOLDER_CLASS = 'rhuc-placeholder';
 
     const hasGM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
 
@@ -178,13 +179,23 @@
         const body = getOwnBody(comment, entry);
         if (!body) return;
 
+        applyHide(body, '<div class="md ' + PLACEHOLDER_CLASS + '"><p><em>ignored</em></p></div>', author);
+    }
+
+    // Replace `body.innerHTML` with `replacement` if the user is ignored and
+    // the placeholder isn't currently present (so we recover whenever reddit
+    // re-renders the body and wipes our content). Restore otherwise.
+    function applyHide(body, replacement, author) {
+        const hasPlaceholder = !!body.querySelector('.' + PLACEHOLDER_CLASS);
         if (isIgnored(author)) {
-            if (!body.hasAttribute(HIDDEN_ATTR)) {
+            if (!hasPlaceholder) {
+                if (!body.hasAttribute(ORIGINAL_ATTR)) {
+                    body.setAttribute(ORIGINAL_ATTR, encodeURIComponent(body.innerHTML));
+                }
                 body.setAttribute(HIDDEN_ATTR, '1');
-                body.setAttribute(ORIGINAL_ATTR, encodeURIComponent(body.innerHTML));
-                body.innerHTML = '<div class="md"><p><em>ignored</em></p></div>';
+                body.innerHTML = replacement;
             }
-        } else if (body.hasAttribute(HIDDEN_ATTR)) {
+        } else if (body.hasAttribute(HIDDEN_ATTR) || hasPlaceholder) {
             const original = body.getAttribute(ORIGINAL_ATTR);
             if (original !== null) body.innerHTML = decodeURIComponent(original);
             body.removeAttribute(HIDDEN_ATTR);
@@ -224,18 +235,7 @@
         }
         if (!body) return;
 
-        if (isIgnored(author)) {
-            if (!body.hasAttribute(HIDDEN_ATTR)) {
-                body.setAttribute(HIDDEN_ATTR, '1');
-                body.setAttribute(ORIGINAL_ATTR, encodeURIComponent(body.innerHTML));
-                body.innerHTML = '<p><em>ignored</em></p>';
-            }
-        } else if (body.hasAttribute(HIDDEN_ATTR)) {
-            const original = body.getAttribute(ORIGINAL_ATTR);
-            if (original !== null) body.innerHTML = decodeURIComponent(original);
-            body.removeAttribute(HIDDEN_ATTR);
-            body.removeAttribute(ORIGINAL_ATTR);
-        }
+        applyHide(body, '<p class="' + PLACEHOLDER_CLASS + '"><em>ignored</em></p>', author);
     }
 
     // ---------- Drive ----------
